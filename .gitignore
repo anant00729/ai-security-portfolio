@@ -1,0 +1,8 @@
+.env
+*.env
+__pycache__/
+.venv/
+.DS_Store
+videos/
+*.mp4
+*.mov

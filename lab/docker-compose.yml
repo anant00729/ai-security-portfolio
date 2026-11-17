@@ -1,0 +1,34 @@
+# Week 1 lab stack. Ollama runs natively on the Mac host (Metal GPU);
+# containers reach it via host.docker.internal.
+# All ports bind to 127.0.0.1 only — lab services never exposed to the LAN.
+services:
+  chroma:
+    image: chromadb/chroma:0.6.3
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      - ANONYMIZED_TELEMETRY=FALSE
+
+  app:
+    build: ./app
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - CHAT_MODEL=gemma3:1b
+      - CHROMA_HOST=chroma
+      - CHROMA_PORT=8000
+    depends_on:
+      - chroma
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  chroma-data:
