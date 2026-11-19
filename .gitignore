@@ -6,3 +6,6 @@ __pycache__/
 videos/
 *.mp4
 *.mov
+audit.log
+*.log
+.pytest_cache/
