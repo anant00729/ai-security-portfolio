@@ -2,6 +2,7 @@
 import os
 os.environ["VIEWER_KEY"] = "test-viewer-key"
 os.environ["ADMIN_KEY"] = "test-admin-key"
+from aaa_app import app, get_hour
 
 import json
 import pytest
@@ -41,8 +42,12 @@ def test_viewer_delete_403():
     assert client.delete("/reports/2", headers=VIEWER).status_code == 403
 
 def test_admin_delete_200():
-    assert client.delete("/reports/1", headers=ADMIN).status_code == 200
-
+    app.dependency_overrides[get_hour] = lambda: 10
+    try:
+        assert client.delete("/reports/1", headers=ADMIN).status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+        
 def test_denied_request_is_logged():
     client.get("/reports")
     assert any(e["decision"] == "denied" for e in read_log())

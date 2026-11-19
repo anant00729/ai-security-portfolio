@@ -8,45 +8,95 @@ from zt_policy import Context, decide
 
 app = FastAPI()
 
+# FLAWED: honeytoken hard-coded in the source
+# HONEYTOKEN = "AKIA-CANARY-7f3k9q2m"
+# FIX: load from the real .env / environment, like other secrets
+HONEYTOKEN = os.environ["HONEYTOKEN"]
+
 API_KEYS = {
     os.environ["VIEWER_KEY"]: {"user": "alice", "role": "viewer"},
     os.environ["ADMIN_KEY"]: {"user": "bob", "role": "admin"},
+    # FLAWED: honeytoken is a working login key
+    # HONEYTOKEN: {"user": "svc-backup", "role": "viewer"},
+    # FIX: removed - bait must never grant access
 }
 
 REPORTS = {1: "Q1 report", 2: "Q2 report", 3: "Q3 report"}
 
-# PIP: server-side facts about each user
 USER_SECURITY = {
     "alice": {"mfa_passed": True, "device_managed": False},
     "bob": {"mfa_passed": True, "device_managed": True},
 }
 
-# Server-side route -> policy map
 ROUTE_POLICY = {
     ("GET", "/reports"): {"sensitivity": "low", "action": "read"},
     ("GET", "/reports/{report_id}"): {"sensitivity": "high", "action": "read"},
     ("DELETE", "/reports/{report_id}"): {"sensitivity": "high", "action": "admin"},
 }
 
-# Lab stand-in for a real geo-IP database (e.g. MaxMind)
 GEO_IP = {"127.0.0.1": "CA", "testclient": "CA"}
+
+GENERIC_401 = "Invalid or missing API key"
+
+
+def check_honeytoken(request: Request, key: str) -> bool:
+    # FLAWED: == comparison leaks timing
+    # if key == HONEYTOKEN:
+    # FIX: constant-time comparison
+    if not secrets.compare_digest(key, HONEYTOKEN):
+        return False
+
+    # FLAWED: IP from client-controlled header
+    # ip = request.headers.get("x-forwarded-for", request.client.host)
+    # FIX: IP from the real connection
+    ip = request.client.host if request.client else "unknown"
+    ua = request.headers.get("user-agent", "")
+
+    # FLAWED: f-string JSON (log injection), level INFO, full key logged
+    # line = (
+    #     f'{{"event": "honeytoken_used", "level": "INFO", '
+    #     f'"ts": "{datetime.datetime.now(datetime.timezone.utc).isoformat()}", '
+    #     f'"ip": "{ip}", "user_agent": "{ua}", "key": "{key}", '
+    #     f'"method": "{request.method}", "path": "{request.url.path}"}}'
+    # )
+    # FIX: json.dumps escapes input, level CRITICAL, only a short key prefix
+    entry = {
+        "event": "honeytoken_used",
+        "level": "CRITICAL",
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "ip": ip,
+        "user_agent": ua,
+        "key_prefix": key[:9] + "...",
+        "method": request.method,
+        "path": request.url.path,
+    }
+    with open("audit.log", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return True
 
 
 def get_current_user(request: Request, x_api_key: str | None = Header(default=None)) -> dict:
+    # FLAWED: honeytoken checked AFTER the login loop, with a revealing message
+    # if x_api_key:
+    #     for key, info in API_KEYS.items():
+    #         if secrets.compare_digest(x_api_key, key):
+    #             request.state.user = info["user"]
+    #             return info
+    #     if check_honeytoken(request, x_api_key):
+    #         raise HTTPException(status_code=401, detail="Invalid API key - this incident has been reported")
+    # raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+    # FIX: honeytoken checked FIRST, same 401 as any bad key
     if x_api_key:
+        if check_honeytoken(request, x_api_key):
+            raise HTTPException(status_code=401, detail=GENERIC_401)
         for key, info in API_KEYS.items():
             if secrets.compare_digest(x_api_key, key):
                 request.state.user = info["user"]
                 return info
-    raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    raise HTTPException(status_code=401, detail=GENERIC_401)
 
 
-# FLAWED: country taken from a client header, and missing header defaults to an allowed country
-# def get_country(request: Request) -> str:
-#     return request.headers.get("x-forwarded-country", "CA")
-
-
-# FIX: country from the connection IP, unknown IP -> "UNKNOWN" (gets denied)
 def get_country(request: Request) -> str:
     ip = request.client.host if request.client else ""
     return GEO_IP.get(ip, "UNKNOWN")
@@ -56,37 +106,6 @@ def get_hour() -> int:
     return datetime.datetime.now(datetime.timezone.utc).hour
 
 
-# FLAWED: unmapped route defaults to low/read, device status from client header,
-# and the exact deny reason is sent back to the client
-# def zero_trust(
-#     request: Request,
-#     user: dict = Depends(get_current_user),
-#     country: str = Depends(get_country),
-#     hour: int = Depends(get_hour),
-# ) -> dict:
-#     route = request.scope["route"].path
-#     policy = ROUTE_POLICY.get(
-#         (request.method, route), {"sensitivity": "low", "action": "read"}
-#     )
-#     security = USER_SECURITY.get(user["user"], {})
-#     ctx = Context(
-#         user=user["user"],
-#         role=user["role"],
-#         mfa_passed=security.get("mfa_passed", False),
-#         device_managed=request.headers.get("x-device-managed") == "true",
-#         resource_sensitivity=policy["sensitivity"],
-#         country=country,
-#         hour=hour,
-#         action=policy["action"],
-#     )
-#     decision = decide(ctx)
-#     request.state.reason = decision.reason
-#     if not decision.allow:
-#         raise HTTPException(status_code=403, detail=decision.reason)
-#     return user
-
-
-# FIX: PEP with default deny, server-side signals only, generic message to client
 def zero_trust(
     request: Request,
     user: dict = Depends(get_current_user),
@@ -95,7 +114,7 @@ def zero_trust(
 ) -> dict:
     route = request.scope["route"].path
     policy = ROUTE_POLICY.get((request.method, route))
-    if policy is None:                                    # FIX 1: unmapped route -> deny
+    if policy is None:
         request.state.reason = f"unmapped route {request.method} {route}"
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -104,16 +123,16 @@ def zero_trust(
         user=user["user"],
         role=user["role"],
         mfa_passed=security.get("mfa_passed", False),
-        device_managed=security.get("device_managed", False),  # FIX 2: server-side, not header
+        device_managed=security.get("device_managed", False),
         resource_sensitivity=policy["sensitivity"],
         country=country,
         hour=hour,
         action=policy["action"],
     )
     decision = decide(ctx)
-    request.state.reason = decision.reason               # real reason -> audit log only
+    request.state.reason = decision.reason
     if not decision.allow:
-        raise HTTPException(status_code=403, detail="Access denied")  # FIX 3: generic message
+        raise HTTPException(status_code=403, detail="Access denied")
     return user
 
 
