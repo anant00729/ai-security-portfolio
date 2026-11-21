@@ -2,4 +2,4 @@
 
 | Date | Test | Score | Weakest domain |
 |---|---|---|---|
-| | Dion SY0-701 #1 (diagnostic) | % | |
+| 2026-11-20 | Claude diagnostic 40Q | 62.5% | D5 Program Mgmt & Oversight |
